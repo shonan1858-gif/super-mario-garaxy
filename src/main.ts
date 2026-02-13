@@ -104,6 +104,8 @@ const playerMesh = new THREE.Mesh(
 );
 scene.add(playerMesh);
 
+spawnSurfaceProps();
+
 let grounded = false;
 let wasGrounded = false;
 let jumpComboIndex = 0;
@@ -119,6 +121,87 @@ let boomerangCooldown = 1.1;
 const fixedDt = 1 / 60;
 let prev = performance.now() / 1000;
 let acc = 0;
+
+function surfaceUpFromLatLng(lat: number, lng: number): THREE.Vector3 {
+  return new THREE.Vector3(
+    Math.cos(lat) * Math.sin(lng),
+    Math.sin(lat),
+    Math.cos(lat) * Math.cos(lng)
+  ).normalize();
+}
+
+function spawnSurfaceProps() {
+  const propSpecs = [
+    { type: 'rock', lat: 0.2, lng: 0.15, s: 2.2 },
+    { type: 'rock', lat: 0.35, lng: 1.6, s: 1.8 },
+    { type: 'rock', lat: -0.1, lng: -1.2, s: 2.6 },
+    { type: 'rock', lat: -0.4, lng: 2.1, s: 2.0 },
+    { type: 'pillar', lat: 0.55, lng: 0.95, h: 7.4, r: 1.05 },
+    { type: 'pillar', lat: -0.3, lng: 2.65, h: 8.2, r: 0.95 },
+    { type: 'pillar', lat: 0.12, lng: -2.25, h: 6.8, r: 1.1 },
+    { type: 'building', lat: 0.5, lng: -0.85, h: 10.0, w: 3.8, d: 3.8 },
+    { type: 'building', lat: -0.22, lng: 0.7, h: 8.6, w: 3.4, d: 3.1 },
+    { type: 'building', lat: 0.05, lng: -1.75, h: 9.8, w: 3.3, d: 4.1 },
+    { type: 'building', lat: -0.5, lng: -0.35, h: 7.7, w: 3.1, d: 3.1 }
+  ] as const;
+
+  for (const prop of propSpecs) {
+    const up = surfaceUpFromLatLng(prop.lat, prop.lng);
+    const alignToNormal = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
+
+    if (prop.type === 'rock') {
+      const radius = prop.s * 0.5;
+      const mesh = new THREE.Mesh(
+        new THREE.DodecahedronGeometry(radius, 0),
+        new THREE.MeshStandardMaterial({ color: '#7f7f7f', roughness: 1 })
+      );
+      mesh.position.copy(up.clone().multiplyScalar(PLANET_RADIUS + radius * 0.92));
+      mesh.quaternion.copy(alignToNormal);
+      scene.add(mesh);
+
+      const rb = world.createRigidBody(
+        RAPIER.RigidBodyDesc.fixed().setTranslation(mesh.position.x, mesh.position.y, mesh.position.z)
+      );
+      world.createCollider(RAPIER.ColliderDesc.ball(radius * 0.85), rb);
+      continue;
+    }
+
+    if (prop.type === 'pillar') {
+      const halfHeight = prop.h * 0.5;
+      const mesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(prop.r, prop.r * 1.15, prop.h, 10),
+        new THREE.MeshStandardMaterial({ color: '#9d8f77', roughness: 0.95 })
+      );
+      mesh.position.copy(up.clone().multiplyScalar(PLANET_RADIUS + halfHeight));
+      mesh.quaternion.copy(alignToNormal);
+      scene.add(mesh);
+
+      const rb = world.createRigidBody(
+        RAPIER.RigidBodyDesc.fixed()
+          .setTranslation(mesh.position.x, mesh.position.y, mesh.position.z)
+          .setRotation({ x: mesh.quaternion.x, y: mesh.quaternion.y, z: mesh.quaternion.z, w: mesh.quaternion.w })
+      );
+      world.createCollider(RAPIER.ColliderDesc.cuboid(prop.r, halfHeight, prop.r), rb);
+      continue;
+    }
+
+    const halfHeight = prop.h * 0.5;
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(prop.w, prop.h, prop.d),
+      new THREE.MeshStandardMaterial({ color: '#8ea4bf', roughness: 0.9 })
+    );
+    mesh.position.copy(up.clone().multiplyScalar(PLANET_RADIUS + halfHeight));
+    mesh.quaternion.copy(alignToNormal);
+    scene.add(mesh);
+
+    const rb = world.createRigidBody(
+      RAPIER.RigidBodyDesc.fixed()
+        .setTranslation(mesh.position.x, mesh.position.y, mesh.position.z)
+        .setRotation({ x: mesh.quaternion.x, y: mesh.quaternion.y, z: mesh.quaternion.z, w: mesh.quaternion.w })
+    );
+    world.createCollider(RAPIER.ColliderDesc.cuboid(prop.w * 0.5, halfHeight, prop.d * 0.5), rb);
+  }
+}
 
 function resetPlayer() {
   isClear = false;
