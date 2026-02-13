@@ -6,15 +6,14 @@ const PLANET_RADIUS = 100;
 const GRAVITY = 28;
 const BASE_SPEED = 10.5;
 const DASH_MULTIPLIER = 1.75;
-const BASE_ACCEL_GROUND = 42;
-const BASE_ACCEL_AIR = 16;
-const BASE_DRAG_GROUND = 8.5;
-const BASE_DRAG_AIR = 1.2;
+const BASE_ACCEL_GROUND = 34;
+const BASE_ACCEL_AIR = 13;
+const BASE_DRAG_GROUND = 7.2;
+const BASE_DRAG_AIR = 0.9;
 
 const JUMP_IMPULSES = [7.0, 8.5, 10.0] as const;
-const JUMP_BUFFER_TIME = 0.15;
 const JUMP_COMBO_WINDOW = 0.7;
-const GROUND_RAY_LEN = 1.95;
+const GROUND_RAY_LEN = 2.3;
 
 const BOOMERANG_COOLDOWN = 2.0;
 const BOOMERANG_MAX_DIST = 16;
@@ -72,10 +71,10 @@ boomerangMesh.visible = false;
 scene.add(boomerangMesh);
 
 const input = new Set<string>();
-let jumpBufferTimer = 0;
+let jumpRequested = false;
 addEventListener('keydown', (e) => {
   input.add(e.code);
-  if (e.code === 'Space') jumpBufferTimer = JUMP_BUFFER_TIME;
+  if (e.code === 'Space') jumpRequested = true;
   if (e.code === 'KeyR') resetPlayer();
 });
 addEventListener('keyup', (e) => input.delete(e.code));
@@ -91,8 +90,8 @@ addEventListener('mousemove', (e) => {
 
 await RAPIER.init();
 const world = new RAPIER.World({ x: 0, y: 0, z: 0 });
-const planetRb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-const planetCol = world.createCollider(RAPIER.ColliderDesc.ball(PLANET_RADIUS), planetRb);
+world.createCollider(RAPIER.ColliderDesc.ball(PLANET_RADIUS), world.createRigidBody(RAPIER.RigidBodyDesc.fixed()));
+
 const playerRb = world.createRigidBody(
   RAPIER.RigidBodyDesc.dynamic().setTranslation(0, PLANET_RADIUS + 3.2, 0).setCanSleep(false).lockRotations()
 );
@@ -104,14 +103,14 @@ const playerMesh = new THREE.Mesh(
 );
 scene.add(playerMesh);
 
-spawnSurfaceProps();
-
 let grounded = false;
 let wasGrounded = false;
 let jumpComboIndex = 0;
 let comboTimer = Number.POSITIVE_INFINITY;
 let isClear = false;
 let hitFlash = 0;
+let smoothedInputX = 0;
+let smoothedInputZ = 0;
 
 let boomerangActive = false;
 let boomerangOutward = true;
@@ -132,17 +131,18 @@ function surfaceUpFromLatLng(lat: number, lng: number): THREE.Vector3 {
 
 function spawnSurfaceProps() {
   const propSpecs = [
-    { type: 'rock', lat: 0.2, lng: 0.15, s: 2.2 },
-    { type: 'rock', lat: 0.35, lng: 1.6, s: 1.8 },
-    { type: 'rock', lat: -0.1, lng: -1.2, s: 2.6 },
-    { type: 'rock', lat: -0.4, lng: 2.1, s: 2.0 },
-    { type: 'pillar', lat: 0.55, lng: 0.95, h: 7.4, r: 1.05 },
-    { type: 'pillar', lat: -0.3, lng: 2.65, h: 8.2, r: 0.95 },
-    { type: 'pillar', lat: 0.12, lng: -2.25, h: 6.8, r: 1.1 },
-    { type: 'building', lat: 0.5, lng: -0.85, h: 10.0, w: 3.8, d: 3.8 },
-    { type: 'building', lat: -0.22, lng: 0.7, h: 8.6, w: 3.4, d: 3.1 },
-    { type: 'building', lat: 0.05, lng: -1.75, h: 9.8, w: 3.3, d: 4.1 },
-    { type: 'building', lat: -0.5, lng: -0.35, h: 7.7, w: 3.1, d: 3.1 }
+    { type: 'rock', lat: 0.16, lng: -1.5, s: 2.0 },
+    { type: 'rock', lat: -0.3, lng: 2.2, s: 2.4 },
+    { type: 'rock', lat: 0.62, lng: 0.6, s: 1.8 },
+    { type: 'rock', lat: -0.52, lng: -2.2, s: 2.1 },
+    { type: 'pillar', lat: 0.72, lng: 1.45, h: 8.2, r: 1.0 },
+    { type: 'pillar', lat: -0.36, lng: -0.35, h: 6.8, r: 1.2 },
+    { type: 'pillar', lat: 0.25, lng: 2.72, h: 7.6, r: 0.95 },
+    // Buildings: clearly separated and rideable flat tops
+    { type: 'building', lat: 0.02, lng: 0.9, h: 9.8, w: 4.8, d: 4.8, c: '#8ea4bf' },
+    { type: 'building', lat: -0.14, lng: 0.36, h: 8.9, w: 4.2, d: 4.6, c: '#9fb6d1' },
+    { type: 'building', lat: 0.21, lng: 1.36, h: 10.8, w: 4.6, d: 4.2, c: '#8398b3' },
+    { type: 'building', lat: -0.6, lng: -1.05, h: 7.4, w: 3.5, d: 3.2, c: '#7f95af' }
   ] as const;
 
   for (const prop of propSpecs) {
@@ -159,17 +159,15 @@ function spawnSurfaceProps() {
       mesh.quaternion.copy(alignToNormal);
       scene.add(mesh);
 
-      const rb = world.createRigidBody(
-        RAPIER.RigidBodyDesc.fixed().setTranslation(mesh.position.x, mesh.position.y, mesh.position.z)
-      );
-      world.createCollider(RAPIER.ColliderDesc.ball(radius * 0.85), rb);
+      const rb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(mesh.position.x, mesh.position.y, mesh.position.z));
+      world.createCollider(RAPIER.ColliderDesc.ball(radius * 0.92), rb);
       continue;
     }
 
     if (prop.type === 'pillar') {
       const halfHeight = prop.h * 0.5;
       const mesh = new THREE.Mesh(
-        new THREE.CylinderGeometry(prop.r, prop.r * 1.15, prop.h, 10),
+        new THREE.CylinderGeometry(prop.r, prop.r * 1.12, prop.h, 10),
         new THREE.MeshStandardMaterial({ color: '#9d8f77', roughness: 0.95 })
       );
       mesh.position.copy(up.clone().multiplyScalar(PLANET_RADIUS + halfHeight));
@@ -181,14 +179,14 @@ function spawnSurfaceProps() {
           .setTranslation(mesh.position.x, mesh.position.y, mesh.position.z)
           .setRotation({ x: mesh.quaternion.x, y: mesh.quaternion.y, z: mesh.quaternion.z, w: mesh.quaternion.w })
       );
-      world.createCollider(RAPIER.ColliderDesc.cuboid(prop.r, halfHeight, prop.r), rb);
+      world.createCollider(RAPIER.ColliderDesc.cuboid(prop.r * 1.02, halfHeight, prop.r * 1.02), rb);
       continue;
     }
 
     const halfHeight = prop.h * 0.5;
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(prop.w, prop.h, prop.d),
-      new THREE.MeshStandardMaterial({ color: '#8ea4bf', roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: prop.c, roughness: 0.88 })
     );
     mesh.position.copy(up.clone().multiplyScalar(PLANET_RADIUS + halfHeight));
     mesh.quaternion.copy(alignToNormal);
@@ -203,12 +201,16 @@ function spawnSurfaceProps() {
   }
 }
 
+spawnSurfaceProps();
+
 function resetPlayer() {
   isClear = false;
   clearMsg.textContent = '';
-  jumpBufferTimer = 0;
+  jumpRequested = false;
   jumpComboIndex = 0;
   comboTimer = Number.POSITIVE_INFINITY;
+  smoothedInputX = 0;
+  smoothedInputZ = 0;
   playerRb.setTranslation({ x: 0, y: PLANET_RADIUS + 3.2, z: 0 }, true);
   playerRb.setLinvel({ x: 0, y: 0, z: 0 }, true);
 }
@@ -269,31 +271,33 @@ function physicsStep(dt: number) {
   const down = up.clone().multiplyScalar(-1);
 
   const ray = new RAPIER.Ray(p, { x: down.x, y: down.y, z: down.z });
-  grounded = !!world.castRay(ray, GROUND_RAY_LEN, true, undefined, undefined, planetCol, undefined);
+  grounded = !!world.castRay(ray, GROUND_RAY_LEN, true);
 
   if (grounded && !wasGrounded) comboTimer = 0;
   if (grounded) comboTimer += dt;
   if (comboTimer > JUMP_COMBO_WINDOW) jumpComboIndex = 0;
-  if (jumpBufferTimer > 0) jumpBufferTimer -= dt;
 
   const lv = playerRb.linvel();
   const velocity = new THREE.Vector3(lv.x, lv.y, lv.z);
   velocity.addScaledVector(down, GRAVITY * dt);
 
   if (!isClear) {
-    const moveX = (input.has('KeyD') ? 1 : 0) - (input.has('KeyA') ? 1 : 0);
-    const moveZ = (input.has('KeyW') ? 1 : 0) - (input.has('KeyS') ? 1 : 0);
+    const targetInputX = (input.has('KeyD') ? 1 : 0) - (input.has('KeyA') ? 1 : 0);
+    const targetInputZ = (input.has('KeyW') ? 1 : 0) - (input.has('KeyS') ? 1 : 0);
+    const smooth = 1 - Math.exp(-10 * dt);
+    smoothedInputX = THREE.MathUtils.lerp(smoothedInputX, targetInputX, smooth);
+    smoothedInputZ = THREE.MathUtils.lerp(smoothedInputZ, targetInputZ, smooth);
     const dashing = input.has('ShiftLeft') || input.has('ShiftRight');
 
     const camForward = projectOnPlane(new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)), up).normalize();
     const camRight = new THREE.Vector3().crossVectors(camForward, up).normalize();
-    const wishDir = camForward.multiplyScalar(moveZ).add(camRight.multiplyScalar(moveX));
+    const wishDir = camForward.multiplyScalar(smoothedInputZ).add(camRight.multiplyScalar(smoothedInputX));
     if (wishDir.lengthSq() > 0) wishDir.normalize();
 
     const speedCap = BASE_SPEED * (dashing ? DASH_MULTIPLIER : 1);
-    const accelGround = BASE_ACCEL_GROUND * (dashing ? 1.2 : 1);
-    const accelAir = BASE_ACCEL_AIR * (dashing ? 1.1 : 1);
-    const dragGround = BASE_DRAG_GROUND * (dashing ? 0.78 : 1);
+    const accelGround = BASE_ACCEL_GROUND * (dashing ? 1.22 : 1);
+    const accelAir = BASE_ACCEL_AIR * (dashing ? 1.08 : 1);
+    const dragGround = BASE_DRAG_GROUND * (dashing ? 0.82 : 1);
 
     const tangentialVel = projectOnPlane(velocity, up);
     const normalVel = velocity.clone().sub(tangentialVel);
@@ -308,14 +312,17 @@ function physicsStep(dt: number) {
 
     playerRb.setLinvel(velocity, true);
 
-    if (grounded && jumpBufferTimer > 0) {
+    if (grounded && jumpRequested) {
       if (comboTimer > JUMP_COMBO_WINDOW) jumpComboIndex = 0;
       const jumpImpulse = JUMP_IMPULSES[jumpComboIndex];
       playerRb.applyImpulse({ x: up.x * jumpImpulse, y: up.y * jumpImpulse, z: up.z * jumpImpulse }, true);
       grounded = false;
-      jumpBufferTimer = 0;
       comboTimer = Number.POSITIVE_INFINITY;
       jumpComboIndex = jumpComboIndex >= JUMP_IMPULSES.length - 1 ? 0 : jumpComboIndex + 1;
+    }
+    // ジャンプ後、着地まで入力無効
+    if (jumpRequested && !grounded) {
+      jumpRequested = false;
     }
   } else {
     playerRb.setLinvel(velocity, true);
