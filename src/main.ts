@@ -4,11 +4,12 @@ import RAPIER from '@dimforge/rapier3d-compat';
 
 const PLANET_RADIUS = 100;
 const GRAVITY = 28;
-const V_MAX = 10.5;
-const A_GROUND = 42;
-const A_AIR = 16;
-const DRAG_GROUND = 8.5;
-const DRAG_AIR = 1.2;
+const BASE_V_MAX = 10.5;
+const DASH_MULTIPLIER = 1.7;
+const BASE_A_GROUND = 42;
+const BASE_A_AIR = 16;
+const BASE_DRAG_GROUND = 8.5;
+const BASE_DRAG_AIR = 1.2;
 const JUMP_IMPULSES = [7.0, 8.5, 10.0] as const;
 const JUMP_BUFFER_TIME = 0.15;
 const JUMP_COMBO_WINDOW = 0.7;
@@ -41,11 +42,57 @@ const planetMesh = new THREE.Mesh(
 );
 scene.add(planetMesh);
 
+// Building props (3)
+const buildingLatLng = [
+  { lat: 0.35, lng: 0.8 },
+  { lat: -0.15, lng: -1.5 },
+  { lat: 0.55, lng: 2.2 }
+];
+for (const [i, ll] of buildingLatLng.entries()) {
+  const up = new THREE.Vector3(
+    Math.cos(ll.lat) * Math.sin(ll.lng),
+    Math.sin(ll.lat),
+    Math.cos(ll.lat) * Math.cos(ll.lng)
+  ).normalize();
+  const h = 7 + i * 1.8;
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(3.5, h, 3.5),
+    new THREE.MeshStandardMaterial({ color: i === 1 ? '#6f8199' : '#8ea4bf', roughness: 0.9 })
+  );
+  mesh.position.copy(up.clone().multiplyScalar(PLANET_RADIUS + h * 0.5));
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
+  scene.add(mesh);
+}
+
 const goalPos = new THREE.Vector3(0, PLANET_RADIUS + 1, -36).normalize().multiplyScalar(PLANET_RADIUS + 1.4);
 const goalMesh = new THREE.Mesh(new THREE.TorusGeometry(3.6, 0.55, 16, 56), new THREE.MeshStandardMaterial({ color: '#ffd764' }));
 goalMesh.position.copy(goalPos);
 goalMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), goalPos.clone().normalize());
 scene.add(goalMesh);
+
+// Enemy + boomerang
+const enemyUp = new THREE.Vector3(0.42, 0.82, -0.38).normalize();
+const enemyAnchor = enemyUp.clone().multiplyScalar(PLANET_RADIUS + 1.8);
+const enemyMesh = new THREE.Mesh(
+  new THREE.CapsuleGeometry(1.0, 1.6, 4, 10),
+  new THREE.MeshStandardMaterial({ color: '#6b2fa2' })
+);
+enemyMesh.position.copy(enemyAnchor);
+enemyMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), enemyUp);
+scene.add(enemyMesh);
+
+const boomerangMesh = new THREE.Mesh(
+  new THREE.TorusGeometry(1.2, 0.18, 8, 20, Math.PI * 1.45),
+  new THREE.MeshStandardMaterial({ color: '#ff9234', emissive: '#5b2a00', emissiveIntensity: 0.7 })
+);
+boomerangMesh.visible = false;
+scene.add(boomerangMesh);
+
+let boomerangActive = false;
+let boomerangOutward = true;
+let boomerangDist = 0;
+let boomerangCooldown = 1.6;
+let boomerangHitFlash = 0;
 
 const input = new Set<string>();
 let jumpBufferTimer = 0;
@@ -105,6 +152,51 @@ function projectOnPlane(v: THREE.Vector3, n: THREE.Vector3) {
   return v.clone().sub(n.clone().multiplyScalar(v.dot(n)));
 }
 
+function updateBoomerang(dt: number, playerPos: THREE.Vector3, upAtPlayer: THREE.Vector3) {
+  boomerangCooldown -= dt;
+
+  const enemyToPlayer = playerPos.clone().sub(enemyAnchor);
+  const enemyForward = projectOnPlane(enemyToPlayer, enemyUp).normalize();
+  const enemyRight = new THREE.Vector3().crossVectors(enemyForward, enemyUp).normalize();
+  enemyMesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(enemyRight, enemyUp, enemyForward));
+
+  if (!boomerangActive && boomerangCooldown <= 0) {
+    boomerangActive = true;
+    boomerangOutward = true;
+    boomerangDist = 0;
+    boomerangMesh.visible = true;
+    boomerangCooldown = 2.5;
+  }
+
+  if (!boomerangActive) {
+    return;
+  }
+
+  const throwDir = enemyForward.lengthSq() > 0.001 ? enemyForward : new THREE.Vector3(0, 0, 1);
+  const travelSpeed = 26;
+  boomerangDist += (boomerangOutward ? 1 : -1) * travelSpeed * dt;
+  boomerangDist = THREE.MathUtils.clamp(boomerangDist, 0, 14);
+  if (boomerangDist >= 14) boomerangOutward = false;
+  if (boomerangDist <= 0) {
+    boomerangActive = false;
+    boomerangMesh.visible = false;
+    return;
+  }
+
+  const boomerangPos = enemyAnchor.clone().add(throwDir.multiplyScalar(boomerangDist));
+  boomerangMesh.position.copy(boomerangPos);
+  boomerangMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), enemyUp);
+  boomerangMesh.rotateOnAxis(enemyUp, performance.now() * 0.025);
+
+  const distToPlayer = boomerangPos.distanceTo(playerPos);
+  if (distToPlayer < 1.7) {
+    boomerangHitFlash = 0.15;
+    const push = projectOnPlane(playerPos.clone().sub(boomerangPos), upAtPlayer).normalize().multiplyScalar(8);
+    const current = playerRb.linvel();
+    playerRb.setLinvel({ x: current.x + push.x, y: current.y + push.y, z: current.z + push.z }, true);
+  }
+}
+
 function physicsStep(dt: number) {
   const p = playerRb.translation();
   const pos = new THREE.Vector3(p.x, p.y, p.z);
@@ -113,9 +205,6 @@ function physicsStep(dt: number) {
 
   const hit = world.castRay(new RAPIER.Ray(p, { x: down.x, y: down.y, z: down.z }), GROUND_RAY_LEN, true, undefined, undefined, planetCol, undefined);
   grounded = !!hit;
-  if (!grounded && wasGrounded && hit && hit.timeOfImpact < GROUND_RAY_LEN * 0.5) {
-    grounded = true;
-  }
 
   if (grounded && !wasGrounded) {
     comboTimer = 0;
@@ -137,6 +226,7 @@ function physicsStep(dt: number) {
   if (!isClear) {
     const moveX = (input.has('KeyD') ? 1 : 0) - (input.has('KeyA') ? 1 : 0);
     const moveZ = (input.has('KeyW') ? 1 : 0) - (input.has('KeyS') ? 1 : 0);
+    const dashing = input.has('ShiftLeft') || input.has('ShiftRight');
 
     const camForwardRaw = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
     const forward = projectOnPlane(camForwardRaw, up).normalize();
@@ -144,14 +234,20 @@ function physicsStep(dt: number) {
     const wish = forward.multiplyScalar(moveZ).add(right.multiplyScalar(moveX));
     if (wish.lengthSq() > 0) wish.normalize();
 
+    const vMax = BASE_V_MAX * (dashing ? DASH_MULTIPLIER : 1);
+    const aGround = BASE_A_GROUND * (dashing ? 1.2 : 1);
+    const aAir = BASE_A_AIR * (dashing ? 1.1 : 1);
+    const dragGround = BASE_DRAG_GROUND * (dashing ? 0.8 : 1);
+    const dragAir = BASE_DRAG_AIR;
+
     const vTan = projectOnPlane(v, up);
     const vNorm = v.clone().sub(vTan);
-    const vTarget = wish.multiplyScalar(V_MAX);
+    const vTarget = wish.multiplyScalar(vMax);
     const dv = vTarget.sub(vTan);
-    const maxDelta = (grounded ? A_GROUND : A_AIR) * dt;
+    const maxDelta = (grounded ? aGround : aAir) * dt;
     if (dv.length() > maxDelta) dv.setLength(maxDelta);
 
-    const drag = grounded ? DRAG_GROUND : DRAG_AIR;
+    const drag = grounded ? dragGround : dragAir;
     const vTanNew = vTan.add(dv).multiplyScalar(Math.max(0, 1 - drag * dt));
     v.copy(vTanNew.add(vNorm));
 
@@ -180,6 +276,8 @@ function physicsStep(dt: number) {
   if (dist > PLANET_RADIUS + 60) resetPlayer();
 
   const playerNow = new THREE.Vector3(pNow.x, pNow.y, pNow.z);
+  updateBoomerang(dt, playerNow, playerNow.clone().normalize());
+
   if (!isClear && playerNow.distanceTo(goalPos) < 4.2) {
     isClear = true;
     clearMsg.textContent = 'CLEAR! Press R to Restart';
@@ -195,6 +293,13 @@ function render() {
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
   playerMesh.quaternion.slerp(q, 0.2);
 
+  if (boomerangHitFlash > 0) {
+    boomerangHitFlash -= fixedDt;
+    (playerMesh.material as THREE.MeshStandardMaterial).emissive.set('#772222');
+  } else {
+    (playerMesh.material as THREE.MeshStandardMaterial).emissive.set('#000000');
+  }
+
   const forward = projectOnPlane(new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)), up).normalize();
   const right = new THREE.Vector3().crossVectors(forward, up).normalize();
   const camDir = forward.clone().applyAxisAngle(right, pitch).normalize();
@@ -203,7 +308,8 @@ function render() {
   camera.lookAt(pos.clone().add(up.clone().multiplyScalar(1.6)));
 
   const speed = projectOnPlane(new THREE.Vector3(playerRb.linvel().x, playerRb.linvel().y, playerRb.linvel().z), up).length();
-  hud.innerHTML = `Speed: ${speed.toFixed(2)} m/s<br/>Grounded: ${grounded}<br/>JumpCombo: ${jumpComboIndex + 1}`;
+  const dashing = input.has('ShiftLeft') || input.has('ShiftRight');
+  hud.innerHTML = `Speed: ${speed.toFixed(2)} m/s<br/>Grounded: ${grounded}<br/>JumpCombo: ${jumpComboIndex + 1}<br/>Dash: ${dashing ? 'ON' : 'OFF'}`;
   renderer.render(scene, camera);
 }
 
