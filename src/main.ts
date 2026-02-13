@@ -2,14 +2,17 @@ import './style.css';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 
-const PLANET_RADIUS = 50;
-const GRAVITY = 25;
-const V_MAX = 9;
-const A_GROUND = 45;
-const A_AIR = 18;
-const DRAG_GROUND = 10;
-const DRAG_AIR = 1.5;
-const JUMP_SPEED = 10.5;
+const PLANET_RADIUS = 100;
+const GRAVITY = 28;
+const V_MAX = 10.5;
+const A_GROUND = 42;
+const A_AIR = 16;
+const DRAG_GROUND = 8.5;
+const DRAG_AIR = 1.2;
+const JUMP_IMPULSES = [7.0, 8.5, 10.0] as const;
+const JUMP_BUFFER_TIME = 0.15;
+const JUMP_COMBO_WINDOW = 0.7;
+const GROUND_RAY_LEN = 1.95;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const hud = document.createElement('div');
@@ -22,7 +25,7 @@ app.append(hud, cross, clearMsg);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#0a1727');
-const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 500);
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 900);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 app.appendChild(renderer.domElement);
@@ -38,16 +41,22 @@ const planetMesh = new THREE.Mesh(
 );
 scene.add(planetMesh);
 
-const goalPos = new THREE.Vector3(0, PLANET_RADIUS + 1, -18).normalize().multiplyScalar(PLANET_RADIUS + 0.8);
-const goalMesh = new THREE.Mesh(new THREE.TorusGeometry(2.4, 0.45, 16, 48), new THREE.MeshStandardMaterial({ color: '#ffd764' }));
+const goalPos = new THREE.Vector3(0, PLANET_RADIUS + 1, -36).normalize().multiplyScalar(PLANET_RADIUS + 1.4);
+const goalMesh = new THREE.Mesh(new THREE.TorusGeometry(3.6, 0.55, 16, 56), new THREE.MeshStandardMaterial({ color: '#ffd764' }));
 goalMesh.position.copy(goalPos);
 goalMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), goalPos.clone().normalize());
 scene.add(goalMesh);
 
 const input = new Set<string>();
+let jumpBufferTimer = 0;
 addEventListener('keydown', (e) => {
   input.add(e.code);
-  if (e.code === 'KeyR') resetPlayer();
+  if (e.code === 'Space') {
+    jumpBufferTimer = JUMP_BUFFER_TIME;
+  }
+  if (e.code === 'KeyR') {
+    resetPlayer();
+  }
 });
 addEventListener('keyup', (e) => input.delete(e.code));
 renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
@@ -66,7 +75,7 @@ const planetRb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
 const planetCol = world.createCollider(RAPIER.ColliderDesc.ball(PLANET_RADIUS), planetRb);
 
 const playerRb = world.createRigidBody(
-  RAPIER.RigidBodyDesc.dynamic().setTranslation(0, PLANET_RADIUS + 2.5, 0).setCanSleep(false).lockRotations()
+  RAPIER.RigidBodyDesc.dynamic().setTranslation(0, PLANET_RADIUS + 3.2, 0).setCanSleep(false).lockRotations()
 );
 world.createCollider(RAPIER.ColliderDesc.capsule(0.9, 0.6).setFriction(0.1), playerRb);
 
@@ -74,7 +83,9 @@ const playerMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.6, 1.8, 6, 14), ne
 scene.add(playerMesh);
 
 let grounded = false;
-let jumpLock = 0;
+let wasGrounded = false;
+let jumpComboIndex = 0;
+let comboTimer = Number.POSITIVE_INFINITY;
 let isClear = false;
 const fixedDt = 1 / 60;
 let prev = performance.now() / 1000;
@@ -83,7 +94,10 @@ let acc = 0;
 function resetPlayer() {
   isClear = false;
   clearMsg.textContent = '';
-  playerRb.setTranslation({ x: 0, y: PLANET_RADIUS + 2.5, z: 0 }, true);
+  jumpBufferTimer = 0;
+  jumpComboIndex = 0;
+  comboTimer = Number.POSITIVE_INFINITY;
+  playerRb.setTranslation({ x: 0, y: PLANET_RADIUS + 3.2, z: 0 }, true);
   playerRb.setLinvel({ x: 0, y: 0, z: 0 }, true);
 }
 
@@ -97,8 +111,24 @@ function physicsStep(dt: number) {
   const up = pos.clone().normalize();
   const down = up.clone().multiplyScalar(-1);
 
-  const hit = world.castRay(new RAPIER.Ray(p, { x: down.x, y: down.y, z: down.z }), 1.7, true, undefined, undefined, planetCol, undefined);
+  const hit = world.castRay(new RAPIER.Ray(p, { x: down.x, y: down.y, z: down.z }), GROUND_RAY_LEN, true, undefined, undefined, planetCol, undefined);
   grounded = !!hit;
+  if (!grounded && wasGrounded && hit && hit.timeOfImpact < GROUND_RAY_LEN * 0.5) {
+    grounded = true;
+  }
+
+  if (grounded && !wasGrounded) {
+    comboTimer = 0;
+  }
+  if (grounded) {
+    comboTimer += dt;
+  }
+  if (comboTimer > JUMP_COMBO_WINDOW) {
+    jumpComboIndex = 0;
+  }
+  if (jumpBufferTimer > 0) {
+    jumpBufferTimer -= dt;
+  }
 
   const vel = playerRb.linvel();
   const v = new THREE.Vector3(vel.x, vel.y, vel.z);
@@ -125,23 +155,32 @@ function physicsStep(dt: number) {
     const vTanNew = vTan.add(dv).multiplyScalar(Math.max(0, 1 - drag * dt));
     v.copy(vTanNew.add(vNorm));
 
-    if (jumpLock > 0) jumpLock -= dt;
-    if (grounded && jumpLock <= 0 && input.has('Space')) {
-      v.addScaledVector(up, JUMP_SPEED);
-      jumpLock = 0.1;
+    playerRb.setLinvel(v, true);
+    if (grounded && jumpBufferTimer > 0) {
+      if (comboTimer > JUMP_COMBO_WINDOW) {
+        jumpComboIndex = 0;
+      }
+
+      const impulse = JUMP_IMPULSES[jumpComboIndex];
+      playerRb.applyImpulse({ x: up.x * impulse, y: up.y * impulse, z: up.z * impulse }, true);
       grounded = false;
+      jumpBufferTimer = 0;
+      comboTimer = Number.POSITIVE_INFINITY;
+      jumpComboIndex = jumpComboIndex >= JUMP_IMPULSES.length - 1 ? 0 : jumpComboIndex + 1;
     }
+  } else {
+    playerRb.setLinvel(v, true);
   }
 
-  playerRb.setLinvel(v, true);
   world.step();
+  wasGrounded = grounded;
 
   const pNow = playerRb.translation();
   const dist = Math.hypot(pNow.x, pNow.y, pNow.z);
-  if (dist > PLANET_RADIUS + 30) resetPlayer();
+  if (dist > PLANET_RADIUS + 60) resetPlayer();
 
   const playerNow = new THREE.Vector3(pNow.x, pNow.y, pNow.z);
-  if (!isClear && playerNow.distanceTo(goalPos) < 3.2) {
+  if (!isClear && playerNow.distanceTo(goalPos) < 4.2) {
     isClear = true;
     clearMsg.textContent = 'CLEAR! Press R to Restart';
   }
@@ -159,12 +198,12 @@ function render() {
   const forward = projectOnPlane(new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)), up).normalize();
   const right = new THREE.Vector3().crossVectors(forward, up).normalize();
   const camDir = forward.clone().applyAxisAngle(right, pitch).normalize();
-  camera.position.copy(pos).add(up.clone().multiplyScalar(2.5)).add(camDir.multiplyScalar(-11));
+  camera.position.copy(pos).add(up.clone().multiplyScalar(3.8)).add(camDir.multiplyScalar(-18));
   camera.up.copy(up);
-  camera.lookAt(pos.clone().add(up.clone().multiplyScalar(1.1)));
+  camera.lookAt(pos.clone().add(up.clone().multiplyScalar(1.6)));
 
   const speed = projectOnPlane(new THREE.Vector3(playerRb.linvel().x, playerRb.linvel().y, playerRb.linvel().z), up).length();
-  hud.innerHTML = `Speed: ${speed.toFixed(2)} m/s<br/>Grounded: ${grounded}`;
+  hud.innerHTML = `Speed: ${speed.toFixed(2)} m/s<br/>Grounded: ${grounded}<br/>JumpCombo: ${jumpComboIndex + 1}`;
   renderer.render(scene, camera);
 }
 
